@@ -10,9 +10,11 @@ import torch.nn.functional as F
 from torch import nn
 
 from llama.generation import Generation
-#from llama.lora import LoRALayer
-from torch.utils.checkpoint import checkpoint
-from .model_.lora import Linear
+#from .model_.lora import Linear
+import torch.utils.checkpoint as ckpt
+
+
+
 
 @dataclass
 class ModelArgs:
@@ -149,7 +151,6 @@ def apply_rotary_emb(
     freqs_cis = reshape_for_broadcast(freqs_cis, xq_)
     xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(3)
     xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3)
-    # return xq_out.type_as(xq), xk_out.type_as(xk)
     return xq_out.type_as(xq), xk_out.type_as(xk)
 
 
@@ -195,30 +196,29 @@ class Attention(nn.Module):
         self.n_rep = self.n_local_heads // self.n_local_kv_heads
         self.head_dim = args.dim // args.n_heads
 
-        #self.wq = nn.Linear(args.dim, args.n_heads * self.head_dim, bias=False)
-        self.wq = Linear(args.dim, args.n_heads * self.head_dim, 16, 32, 0.05)
+        self.wq = nn.Linear(args.dim, args.n_heads * self.head_dim, bias=False)
+        #self.wq = Linear(args.dim, args.n_heads * self.head_dim, 16, 32, 0.05)
         self.wk = nn.Linear(args.dim, self.n_kv_heads * self.head_dim, bias=False)
-        #self.wv = nn.Linear(args.dim, self.n_kv_heads * self.head_dim, bias=False)
-        self.wv = Linear(args.dim, args.n_heads * self.head_dim, 16, 32, 0.05)
+        self.wv = nn.Linear(args.dim, self.n_kv_heads * self.head_dim, bias=False)
+        #self.wv = Linear(args.dim, args.n_heads * self.head_dim, 16, 32, 0.05)
         self.wo = nn.Linear(args.n_heads * self.head_dim, args.dim, bias=False)
 
-        # Phase 2: Comment out these variables in order to remove KV-caching
-        # self.cache_k = torch.zeros(
-        #     (
-        #         args.max_batch_size,
-        #         args.max_seq_len,
-        #         self.n_local_kv_heads,
-        #         self.head_dim,
-        #     )
-        # ).cuda()
-        # self.cache_v = torch.zeros(
-        #     (
-        #         args.max_batch_size,
-        #         args.max_seq_len,
-        #         self.n_local_kv_heads,
-        #         self.head_dim,
-        #     )
-        # ).cuda()
+        self.cache_k = torch.zeros(
+            (
+                args.max_batch_size,
+                args.max_seq_len,
+                self.n_local_kv_heads,
+                self.head_dim,
+            )
+        ).cuda()
+        self.cache_v = torch.zeros(
+            (
+                args.max_batch_size,
+                args.max_seq_len,
+                self.n_local_kv_heads,
+                self.head_dim,
+            )
+        ).cuda()
 
     def forward(
         self,
@@ -249,19 +249,15 @@ class Attention(nn.Module):
 
         xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
 
-        # Phase 2: Comment out these variables in order to remove KV-caching
-        # self.cache_k = self.cache_k.to(xq)
-        # self.cache_v = self.cache_v.to(xq)
+        self.cache_k = self.cache_k.to(xq)
+        self.cache_v = self.cache_v.to(xq)
 
-        # self.cache_k[:bsz, start_pos : start_pos + seqlen] = xk
-        # self.cache_v[:bsz, start_pos : start_pos + seqlen] = xv
+        self.cache_k[:bsz, start_pos : start_pos + seqlen] = xk
+        self.cache_v[:bsz, start_pos : start_pos + seqlen] = xv
 
-        # keys = self.cache_k[:bsz, : start_pos + seqlen]
-        # values = self.cache_v[:bsz, : start_pos + seqlen]
+        keys = self.cache_k[:bsz, : start_pos + seqlen]
+        values = self.cache_v[:bsz, : start_pos + seqlen]
 
-        keys = xk
-        values = xv
-        
         # repeat k/v heads if n_kv_heads < n_heads
         keys = repeat_kv(keys, self.n_rep)  # (bs, cache_len + seqlen, n_local_heads, head_dim)
         values = repeat_kv(values, self.n_rep)  # (bs, cache_len + seqlen, n_local_heads, head_dim)
@@ -371,22 +367,12 @@ class TransformerBlock(nn.Module):
             torch.Tensor: Output tensor after applying attention and feedforward layers.
 
         """
+        #h = x + self.attention.forward(self.attention_norm(x), start_pos, freqs_cis, mask)
         
-        """
-        h = x + self.attention.forward(
-            self.attention_norm(x), start_pos, freqs_cis, mask
-        )
-        
- 
-        
-        out = h + self.feed_forward.forward(self.ffn_norm(h))
-        """
-                
         attn_norm_function = lambda x: x + self.attention(self.attention_norm(x), start_pos, freqs_cis, mask)
         h = torch.utils.checkpoint.checkpoint(attn_norm_function, x)
         out = h + self.feed_forward.forward(self.ffn_norm(h))
         return out
-        
 
 
 class Llama(Generation):
