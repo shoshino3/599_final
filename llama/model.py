@@ -10,7 +10,6 @@ import torch.nn.functional as F
 from torch import nn
 
 from llama.generation import Generation
-#from llama.lora import LoRALayer
 from torch.utils.checkpoint import checkpoint
 from .model_.lora import Linear
 
@@ -195,10 +194,10 @@ class Attention(nn.Module):
         self.n_rep = self.n_local_heads // self.n_local_kv_heads
         self.head_dim = args.dim // args.n_heads
 
-        #self.wq = nn.Linear(args.dim, args.n_heads * self.head_dim, bias=False)
+        # self.wq = nn.Linear(args.dim, args.n_heads * self.head_dim, bias=False)
         self.wq = Linear(args.dim, args.n_heads * self.head_dim, 16, 32, 0.05)
         self.wk = nn.Linear(args.dim, self.n_kv_heads * self.head_dim, bias=False)
-        #self.wv = nn.Linear(args.dim, self.n_kv_heads * self.head_dim, bias=False)
+        # self.wv = nn.Linear(args.dim, self.n_kv_heads * self.head_dim, bias=False)
         self.wv = Linear(args.dim, args.n_heads * self.head_dim, 16, 32, 0.05)
         self.wo = nn.Linear(args.n_heads * self.head_dim, args.dim, bias=False)
 
@@ -372,20 +371,18 @@ class TransformerBlock(nn.Module):
 
         """
         
-        """
-        h = x + self.attention.forward(
-            self.attention_norm(x), start_pos, freqs_cis, mask
-        )
-        
- 
-        
-        out = h + self.feed_forward.forward(self.ffn_norm(h))
-        """
-                
-        attn_norm_function = lambda x: x + self.attention(self.attention_norm(x), start_pos, freqs_cis, mask)
-        h = torch.utils.checkpoint.checkpoint(attn_norm_function, x)
-        out = h + self.feed_forward.forward(self.ffn_norm(h))
-        return out
+        # # attn_norm_function = lambda x: x + self.attention(self.attention_norm(x), start_pos, freqs_cis, mask)
+        # # h = torch.utils.checkpoint.checkpoint(attn_norm_function, x)
+        # # out = h + self.feed_forward.forward(self.ffn_norm(h))
+        # return out
+
+        def block_function(x):
+            x = self.attention_norm(x)
+            x = self.attention(x, start_pos, freqs_cis, mask)
+            x = x + self.feed_forward(self.ffn_norm(x))
+            return x
+
+        return checkpoint(block_function, x, use_reentrant=False)
         
 
 
