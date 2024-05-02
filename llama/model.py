@@ -25,7 +25,7 @@ class ModelArgs:
     norm_eps: float = 1e-5
 
     max_batch_size: int = 4
-    max_seq_len: int = 128
+    max_seq_len: int = 256 #128
 
 
 class RMSNorm(torch.nn.Module):
@@ -195,10 +195,10 @@ class Attention(nn.Module):
         self.head_dim = args.dim // args.n_heads
 
         # self.wq = nn.Linear(args.dim, args.n_heads * self.head_dim, bias=False)
-        self.wq = Linear(args.dim, args.n_heads * self.head_dim, 16, 32, 0.05)
+        self.wq = Linear(args.dim, args.n_heads * self.head_dim, 16, 32, 0.05, bias = False)
         self.wk = nn.Linear(args.dim, self.n_kv_heads * self.head_dim, bias=False)
         # self.wv = nn.Linear(args.dim, self.n_kv_heads * self.head_dim, bias=False)
-        self.wv = Linear(args.dim, args.n_heads * self.head_dim, 16, 32, 0.05)
+        self.wv = Linear(args.dim, args.n_heads * self.head_dim, 16, 32, 0.05, bias = False)
         self.wo = nn.Linear(args.n_heads * self.head_dim, args.dim, bias=False)
 
         # Phase 2: Comment out these variables in order to remove KV-caching
@@ -371,20 +371,29 @@ class TransformerBlock(nn.Module):
 
         """
         
+        """
         # # attn_norm_function = lambda x: x + self.attention(self.attention_norm(x), start_pos, freqs_cis, mask)
         # # h = torch.utils.checkpoint.checkpoint(attn_norm_function, x)
         # # out = h + self.feed_forward.forward(self.ffn_norm(h))
         # return out
-
+        
         def block_function(x):
             x = self.attention_norm(x)
             x = self.attention(x, start_pos, freqs_cis, mask)
             x = x + self.feed_forward(self.ffn_norm(x))
             return x
-
-        return checkpoint(block_function, x, use_reentrant=False)
         
-
+        return checkpoint(block_function, x, use_reentrant=False)
+        """
+        
+        h = x + self.attention.forward(
+            self.attention_norm(x), start_pos, freqs_cis, mask
+        )
+        
+        out = h + self.feed_forward.forward(self.ffn_norm(h))
+        
+        return out
+        
 
 class Llama(Generation):
     def __init__(self, params: ModelArgs):
@@ -460,7 +469,9 @@ class Llama(Generation):
             ]).type_as(h)
 
         for layer in self.layers:
-            h = layer(h, start_pos, freqs_cis, mask)
+            #h = layer(h, start_pos, freqs_cis, mask)
+            h = torch.utils.checkpoint.checkpoint(layer, h, start_pos, freqs_cis, mask, use_reentrant = False)
+            
         h = self.norm(h)
         output = self.output(h).float()
         return output

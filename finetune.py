@@ -5,7 +5,6 @@ import logging
 import torch
 from torch.utils.data import Dataset
 from dataclasses import dataclass
-from torch.cuda.amp import GradScaler, autocast
 
 from llama.tokenizer import Tokenizer
 from llama.model import ModelArgs, Llama
@@ -113,12 +112,12 @@ def train():
 
     model_path = "/project/saifhash_1190/llama2-7b/consolidated.00.pth"
     tokenizer_path = "/project/saifhash_1190/llama2-7b/tokenizer.model"
-    data_path = "/project/saifhash_1190/llama2-7b/alpaca_data_dummy.json"
+    data_path = "/project/saifhash_1190/llama2-7b/alpaca_data_200.json"
 
     # load model
     checkpoint = torch.load(model_path, map_location="cpu")
     model_args = ModelArgs()
-    model_args.n_layers = 1  # for debugging purposes we only use 1 layer
+    model_args.n_layers = 32  # for debugging purposes we only use 1 layer
     # torch.set_default_tensor_type(torch.cuda.HalfTensor) # for training we use fp32 weights
     model = Llama(model_args)
     model.load_state_dict(checkpoint, strict=False)
@@ -135,7 +134,13 @@ def train():
         collate_fn=data_module["data_collator"],
         shuffle=True,
     )
-  
+    
+    # Freeze model parameters other than lora weights
+    for name, params in model.named_parameters():
+         if "lora_" in name:
+             params.requires_grad = True
+         else:
+             params.requires_grad = False
     
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     all_params = sum(p.numel() for p in model.parameters())
@@ -146,38 +151,32 @@ def train():
     )
 
     # prepare optimizer and loss function
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
     criterion = torch.nn.CrossEntropyLoss(ignore_index=IGNORE_INDEX)
-
-    scaler = GradScaler()  # Initialize the gradient scaler
-    iters_to_accumulate = 8  # Define how many iterations to accumulate gradients before updating weights
-
+    
+  
     model.train()
     for epoch in range(5):
         for i, batch in enumerate(dataloader):
             input_ids = batch['input_ids'].to("cuda")
             labels = batch['labels'].to("cuda")
 
-            with autocast():  # Start of mixed precision context
-                logits = model(input_ids,0)
-                shift_logits = logits[..., :-1, :].contiguous()
-                shift_labels = labels[..., 1:].contiguous()
-                shift_logits = shift_logits.view(-1, shift_logits.size(-1))
-                shift_labels = shift_labels.view(-1)
-                
-                loss = criterion(shift_logits, shift_labels) / iters_to_accumulate  # Scale down the loss based on accumulation steps
+            logits = model(input_ids,0)
 
-            scaler.scale(loss).backward(retain_graph=True)  # Scale up the loss for the backward pass to manage underflow optimizer.step()
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            shift_logits = shift_logits.view(-1, 32000)
+            shift_labels = shift_labels.view(-1)
 
-            if (i) % iters_to_accumulate == 0:
-                scaler.step(optimizer)  # Unscales gradients and updates weights
-                scaler.update()  # Prepares for the next iteration
-                optimizer.zero_grad()  # Clear gradients after updating weights
+            loss = criterion(shift_logits, shift_labels)
+            loss.backward()
+            optimizer.step()
+            optimizer.zero_grad()
+            
+            if i % 50 == 0:
+              print(f"Epoch: {epoch} | Iter: {i} | Loss: {loss.item():.4f}")
+            #print(f"loss value: {loss.item():.4f}")
 
-            else:
-                optimizer.zero_grad()
-
-            print(f"Loss: {loss.item() * iters_to_accumulate:.4f}")  # Adjust the displayed loss to reflect the actual loss per batch
 
 if __name__ == "__main__":
     train()

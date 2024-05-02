@@ -16,6 +16,7 @@ def inference():
     torch.set_default_tensor_type(torch.cuda.HalfTensor) # load model in fp16
     model = Llama(model_args)
     model.load_state_dict(checkpoint, strict=False)
+    model.load_state_dict(torch.load('lora_weights.pth', map_location = "cpu"), strict = False)
     model.to("cuda")
     
     prompts = [
